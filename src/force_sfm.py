@@ -1,0 +1,180 @@
+import mediapipe as mp
+import numpy as np
+
+
+class ForceSFM:
+
+    def __init__(self):
+
+        # CCTV optimized pose
+        self.pose = mp.solutions.pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            smooth_landmarks=True,
+            enable_segmentation=False,
+            min_detection_confidence=0.3,
+            min_tracking_confidence=0.3
+        )
+
+        self.prev_hand_speed = 0
+
+        # Buffers
+        self.hand_speed_buffer = []
+        self.hand_acc_buffer = []
+        self.neck_disp_buffer = []
+        self.distance_buffer = []
+        self.direction_buffer = []
+
+    # ---------------------------------------------------
+    # Temporal smoothing
+    # ---------------------------------------------------
+    def smooth(self, signal, window=5):
+        if len(signal) < window:
+            return signal
+        return np.convolve(signal, np.ones(window)/window, mode='same')
+
+    # ---------------------------------------------------
+    # Frame-level feature extraction
+    # ---------------------------------------------------
+    def compute_frame(self, flow, frame):
+
+        # Remove camera motion
+        global_motion = np.mean(flow.reshape(-1, 2), axis=0)
+        flow = flow - global_motion
+
+        results = self.pose.process(frame)
+
+        if results.pose_landmarks:
+
+            lm = results.pose_landmarks.landmark
+
+            wrist = lm[mp.solutions.pose.PoseLandmark.RIGHT_WRIST]
+            left_sh = lm[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER]
+            right_sh = lm[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER]
+
+            h, w, _ = frame.shape
+
+            hx, hy = int(wrist.x * w), int(wrist.y * h)
+            nx = int((left_sh.x + right_sh.x) / 2 * w)
+            ny = int((left_sh.y + right_sh.y) / 2 * h)
+
+            hx = np.clip(hx, 0, flow.shape[1] - 1)
+            hy = np.clip(hy, 0, flow.shape[0] - 1)
+            nx = np.clip(nx, 0, flow.shape[1] - 1)
+            ny = np.clip(ny, 0, flow.shape[0] - 1)
+
+            hand_flow = flow[hy, hx]
+            neck_flow = flow[ny, nx]
+
+            hand_speed = np.linalg.norm(hand_flow)
+            neck_disp = np.linalg.norm(neck_flow)
+
+            if np.linalg.norm(hand_flow) > 0 and np.linalg.norm(neck_flow) > 0:
+                direction_similarity = np.dot(hand_flow, neck_flow) / (
+                    np.linalg.norm(hand_flow) * np.linalg.norm(neck_flow)
+                )
+            else:
+                direction_similarity = 0
+
+            distance = np.linalg.norm([hx - nx, hy - ny])
+
+        else:
+            # fallback for far CCTV
+            mag = np.linalg.norm(flow, axis=2)
+            hand_speed = np.percentile(mag, 95)
+            neck_disp = np.percentile(mag, 80)
+            distance = 0
+            direction_similarity = 0
+
+        # Hand acceleration
+        acc = hand_speed - self.prev_hand_speed
+        self.prev_hand_speed = hand_speed
+
+        # Store
+        self.hand_speed_buffer.append(hand_speed)
+        self.hand_acc_buffer.append(acc)
+        self.neck_disp_buffer.append(neck_disp)
+        self.distance_buffer.append(distance)
+        self.direction_buffer.append(direction_similarity)
+
+    # ---------------------------------------------------
+    # Final Force Modeling (Far CCTV Optimized)
+    # ---------------------------------------------------
+    def finalize(self):
+
+        hand_acc = np.array(self.smooth(self.hand_acc_buffer))
+        neck_disp = np.array(self.smooth(self.neck_disp_buffer))
+        distances = np.array(self.smooth(self.distance_buffer))
+        directions = np.array(self.smooth(self.direction_buffer))
+
+        # Distance contraction
+        dist_change = [0]
+        for i in range(1, len(distances)):
+            dist_change.append(distances[i - 1] - distances[i])
+        dist_change = np.array(self.smooth(dist_change))
+
+        # ----------------------------
+        # Relative acceleration threshold
+        # ----------------------------
+        if len(hand_acc) == 0:
+            return [], [], [], [], []
+
+        acc_threshold = np.percentile(np.abs(hand_acc), 85)
+
+        reaction_flags = np.zeros(len(hand_acc))
+
+        for i in range(len(hand_acc)):
+            if abs(hand_acc[i]) > acc_threshold:
+                for j in range(i + 1, min(i + 5, len(neck_disp))):
+                    if neck_disp[j] > np.percentile(neck_disp, 70):
+                        reaction_flags[i] = 1
+                        break
+
+        # ----------------------------
+        # Raw force score
+        # ----------------------------
+        raw_scores = []
+
+        for i in range(len(hand_acc)):
+
+            direction_weight = max(directions[i], 0)
+
+            score = (
+                abs(hand_acc[i]) *
+                (neck_disp[i] + 0.3) *
+                (1 + abs(dist_change[i])) *
+                (1 + direction_weight) *
+                (1 + reaction_flags[i])
+            )
+
+            raw_scores.append(score)
+
+        raw_scores = np.array(raw_scores)
+
+        # Normalize
+        if np.max(raw_scores) > 0:
+            force_indices = raw_scores / np.max(raw_scores)
+        else:
+            force_indices = raw_scores
+
+        # ----------------------------
+        # Sharp spike detection
+        # ----------------------------
+        flags = np.zeros(len(force_indices))
+
+        for i in range(2, len(force_indices) - 2):
+
+            spike = force_indices[i] > np.percentile(force_indices, 90)
+            sharp_rise = force_indices[i] - force_indices[i - 1] > 0.15
+            short_duration = force_indices[i + 2] < force_indices[i] * 0.7
+
+            if spike and sharp_rise and short_duration:
+                flags[i] = 1
+
+        return (
+            hand_acc.tolist(),
+            neck_disp.tolist(),
+            dist_change.tolist(),
+            force_indices.tolist(),
+            flags.tolist()
+        )
