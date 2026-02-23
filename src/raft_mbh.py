@@ -11,8 +11,7 @@ from raft.core.utils.utils import InputPadder
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print("Using device:", device)
+
 # -----------------------------
 # RAFT Model Loading
 # -----------------------------
@@ -155,7 +154,7 @@ def extract_video_mbh(video_path):
         return []
 
     prev = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
-    prev = cv2.resize(prev, (256,256))
+    prev = cv2.resize(prev, (320,320))
 
     window_buffer = []
     all_descriptors = []
@@ -168,7 +167,7 @@ def extract_video_mbh(video_path):
             break
 
         curr = cv2.cvtColor(curr, cv2.COLOR_BGR2RGB)
-        curr = cv2.resize(curr, (256,256))
+        curr = cv2.resize(curr, (320,320))
 
         frame_count += 1
 
