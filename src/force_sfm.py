@@ -6,7 +6,7 @@ class ForceSFM:
 
     def __init__(self):
 
-        # CCTV Optimized Pose
+        # CCTV Optimized Pose Model
         self.pose = mp.solutions.pose.Pose(
             static_image_mode=False,
             model_complexity=1,
@@ -18,6 +18,7 @@ class ForceSFM:
 
         self.prev_hand_speed = 0
 
+        # Buffers
         self.hand_speed_buffer = []
         self.hand_acc_buffer = []
         self.neck_disp_buffer = []
@@ -25,15 +26,15 @@ class ForceSFM:
         self.direction_buffer = []
 
     # ---------------------------------------
-    # Temporal smoothing
+    # Temporal Smoothing (reduces CCTV noise)
     # ---------------------------------------
     def smooth(self, signal, window=5):
         if len(signal) < window:
             return signal
-        return np.convolve(signal, np.ones(window)/window, mode='same')
+        return np.convolve(signal, np.ones(window) / window, mode='same')
 
     # ---------------------------------------
-    # Frame-level feature extraction
+    # Frame-level Feature Extraction
     # ---------------------------------------
     def compute_frame(self, flow, frame):
 
@@ -68,6 +69,7 @@ class ForceSFM:
             hand_speed = np.linalg.norm(hand_flow)
             neck_disp = np.linalg.norm(neck_flow)
 
+            # Direction similarity
             if np.linalg.norm(hand_flow) > 0 and np.linalg.norm(neck_flow) > 0:
                 direction_similarity = np.dot(hand_flow, neck_flow) / (
                     np.linalg.norm(hand_flow) * np.linalg.norm(neck_flow)
@@ -89,6 +91,7 @@ class ForceSFM:
         acc = hand_speed - self.prev_hand_speed
         self.prev_hand_speed = hand_speed
 
+        # Store buffers
         self.hand_speed_buffer.append(hand_speed)
         self.hand_acc_buffer.append(acc)
         self.neck_disp_buffer.append(neck_disp)
@@ -96,13 +99,14 @@ class ForceSFM:
         self.direction_buffer.append(direction_similarity)
 
     # ---------------------------------------
-    # FINAL FORCE MODEL (91% ACCURACY VERSION)
+    # FINAL FORCE MODEL (High Accuracy)
     # ---------------------------------------
     def finalize(self):
 
         if len(self.hand_acc_buffer) == 0:
             return [], [], [], [], []
 
+        # Smooth signals
         hand_acc = np.array(self.smooth(self.hand_acc_buffer))
         neck_disp = np.array(self.smooth(self.neck_disp_buffer))
         distances = np.array(self.smooth(self.distance_buffer))
@@ -112,55 +116,63 @@ class ForceSFM:
         dist_change = np.zeros(len(distances))
         dist_change[1:] = distances[:-1] - distances[1:]
 
-        # ----------------------------
-        # Stronger adaptive threshold
-        # ----------------------------
-        acc_threshold = np.percentile(np.abs(hand_acc), 92)
+        # ---------------------------------------
+        # Strong Adaptive Thresholds
+        # ---------------------------------------
+        acc_threshold = np.percentile(np.abs(hand_acc), 93)
+        neck_threshold = np.percentile(neck_disp, 80)
 
         reaction_flags = np.zeros(len(hand_acc))
 
         for i in range(len(hand_acc)):
             if abs(hand_acc[i]) > acc_threshold:
-                for j in range(i+1, min(i+5, len(neck_disp))):
-                    if neck_disp[j] > np.percentile(neck_disp, 75):
+                for j in range(i + 1, min(i + 5, len(neck_disp))):
+                    if neck_disp[j] > neck_threshold:
                         reaction_flags[i] = 1
                         break
 
-        # ----------------------------
-        # Raw Force Score
-        # ----------------------------
+        # ---------------------------------------
+        # Raw Force Score (Stricter Modeling)
+        # ---------------------------------------
         raw_scores = (
             np.abs(hand_acc) *
-            (neck_disp + 0.3) *
+            (neck_disp + 0.4) *
             (1 + np.abs(dist_change)) *
             (1 + np.maximum(directions, 0)) *
-            (1 + reaction_flags)
+            (1 + 1.5 * reaction_flags)
         )
 
-        # ----------------------------
-        # 99th Percentile Normalization
-        # ----------------------------
-        global_scale = np.percentile(raw_scores, 99)
+        # ---------------------------------------
+        # Robust Normalization (98th percentile)
+        # ---------------------------------------
+        global_scale = np.percentile(raw_scores, 98)
 
         if global_scale > 0:
             force_indices = raw_scores / global_scale
         else:
             force_indices = raw_scores
 
-        # ----------------------------
-        # Strong Spike Detection
-        # ----------------------------
+        # ---------------------------------------
+        # Motion Density (helps reduce punch false alarms)
+        # ---------------------------------------
+        motion_density = np.sum(
+            force_indices > np.percentile(force_indices, 80)
+        ) / len(force_indices)
+
+        # ---------------------------------------
+        # Strict Spike Detection
+        # ---------------------------------------
         flags = np.zeros(len(force_indices))
 
-        for i in range(2, len(force_indices)-2):
+        for i in range(2, len(force_indices) - 2):
 
-            spike = force_indices[i] > np.percentile(force_indices, 95)
-            sharp_rise = force_indices[i] - force_indices[i-1] > 0.25
-            short_duration = force_indices[i+2] < force_indices[i] * 0.6
-            high_enough = force_indices[i] > 0.45
-            multiple_signals = reaction_flags[i] == 1
+            spike = force_indices[i] > np.percentile(force_indices, 96)
+            sharp_rise = force_indices[i] - force_indices[i - 1] > 0.30
+            short_duration = force_indices[i + 2] < force_indices[i] * 0.55
+            high_enough = force_indices[i] > 0.50
+            reaction_present = reaction_flags[i] == 1
 
-            if spike and sharp_rise and short_duration and high_enough and multiple_signals:
+            if spike and sharp_rise and short_duration and high_enough and reaction_present:
                 flags[i] = 1
 
         return (
