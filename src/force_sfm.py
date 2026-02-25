@@ -99,7 +99,7 @@ class ForceSFM:
         self.direction_buffer.append(direction_similarity)
 
     # ---------------------------------------
-    # FINAL FORCE MODEL (High Accuracy)
+    # FINAL FORCE MODEL (Improved Physics Version)
     # ---------------------------------------
     def finalize(self):
 
@@ -121,6 +121,7 @@ class ForceSFM:
         # ---------------------------------------
         acc_threshold = np.percentile(np.abs(hand_acc), 93)
         neck_threshold = np.percentile(neck_disp, 80)
+        dist_threshold = np.percentile(np.abs(dist_change), 85)
 
         reaction_flags = np.zeros(len(hand_acc))
 
@@ -132,7 +133,14 @@ class ForceSFM:
                         break
 
         # ---------------------------------------
-        # Raw Force Score (Stricter Modeling)
+        # Strong Physical Validation (NEW)
+        # ---------------------------------------
+        strong_hand_peak = np.max(np.abs(hand_acc)) > acc_threshold
+        strong_neck_peak = np.max(neck_disp) > neck_threshold
+        strong_pull_peak = np.max(np.abs(dist_change)) > dist_threshold
+
+        # ---------------------------------------
+        # Raw Force Score
         # ---------------------------------------
         raw_scores = (
             np.abs(hand_acc) *
@@ -143,7 +151,7 @@ class ForceSFM:
         )
 
         # ---------------------------------------
-        # Robust Normalization (98th percentile)
+        # Robust Normalization
         # ---------------------------------------
         global_scale = np.percentile(raw_scores, 98)
 
@@ -151,13 +159,6 @@ class ForceSFM:
             force_indices = raw_scores / global_scale
         else:
             force_indices = raw_scores
-
-        # ---------------------------------------
-        # Motion Density (helps reduce punch false alarms)
-        # ---------------------------------------
-        motion_density = np.sum(
-            force_indices > np.percentile(force_indices, 80)
-        ) / len(force_indices)
 
         # ---------------------------------------
         # Strict Spike Detection
@@ -174,6 +175,12 @@ class ForceSFM:
 
             if spike and sharp_rise and short_duration and high_enough and reaction_present:
                 flags[i] = 1
+
+        # ---------------------------------------
+        # Final Physical Consistency Filter
+        # ---------------------------------------
+        if not (strong_hand_peak and strong_neck_peak and strong_pull_peak):
+            flags[:] = 0
 
         return (
             hand_acc.tolist(),

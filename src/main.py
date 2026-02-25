@@ -24,7 +24,7 @@ print("Using device:", device)
 # ------------------------------------
 # VIDEO ARGUMENT SUPPORT
 # ------------------------------------
-VIDEO_ARG = sys.argv[1] if len(sys.argv) > 1 else "snatching_1.mp4"
+VIDEO_ARG = sys.argv[1] if len(sys.argv) > 1 else "chain_snatching27.mp4"
 VIDEO_PATH = os.path.join(ROOT_DIR, "videos", VIDEO_ARG)
 
 # ------------------------------------
@@ -83,6 +83,32 @@ if len(force_indices) == 0:
     print("No motion detected.")
     exit()
 
+# Convert to numpy
+hand_acc = np.array(hand_acc)
+neck_disp = np.array(neck_disp)
+dist_change = np.array(dist_change)
+force_indices = np.array(force_indices)
+flags = np.array(flags)
+
+# ------------------------------------
+# Detailed Force-SfM Output Table
+# ------------------------------------
+df = pd.DataFrame({
+    "frame_id": range(len(force_indices)),
+    "hand_acc": np.round(hand_acc, 3),
+    "neck_disp": np.round(neck_disp, 3),
+    "distance_change": np.round(dist_change, 3),
+    "force_index": np.round(force_indices, 3),
+    "force_flag": flags
+})
+
+print("\n🔎 Force-SfM Detailed Output:")
+print(df.head(20))
+
+if len(force_indices) == 0:
+    print("No motion detected.")
+    exit()
+
 fi_array = np.array(force_indices)
 flag_indices = [i for i, f in enumerate(flags) if f == 1]
 
@@ -94,31 +120,64 @@ max_force = np.max(fi_array)
 spike_ratio = max_force / (mean_force + 1e-6)
 flag_count = len(flag_indices)
 
+# Cluster calculation
 clustered_flags = 0
 if flag_count >= 2:
     for i in range(flag_count - 1):
         if flag_indices[i + 1] - flag_indices[i] <= 15:
             clustered_flags += 1
 
+# Motion density
 motion_density = np.sum(
     fi_array > np.percentile(fi_array, 80)
 ) / len(fi_array)
 
+# Duration of event
 duration = 0
 if flag_count >= 2:
     duration = flag_indices[-1] - flag_indices[0]
+
+# ------------------------------------
+# DIRECT PHYSICAL VALIDATION (NEW)
+# ------------------------------------
+hand_peak = np.max(np.abs(hand_acc))
+neck_peak = np.max(neck_disp)
+pull_peak = np.max(np.abs(dist_change))
+
+strong_hand = hand_peak > np.percentile(np.abs(hand_acc), 90)
+strong_neck = neck_peak > np.percentile(neck_disp, 85)
+strong_pull = pull_peak > np.percentile(np.abs(dist_change), 85)
 
 # ------------------------------------
 # FINAL HIGH-ACCURACY DETECTION LOGIC
 # ------------------------------------
 event_detected = 0
 
+# Additional peak intensity requirement
+strong_peak = max_force > 1.0
+
+# Improved tight cluster validation
+tight_clusters = 0
+if flag_count >= 2:
+    for i in range(flag_count - 1):
+        if flag_indices[i + 1] - flag_indices[i] <= 12:
+            tight_clusters += 1
+
+# Reject sustained motion (fight / punch)
+sustained_motion = motion_density > 0.30
+
+# Final Balanced Rule (ALL CONDITIONS)
 if (
-    spike_ratio > 35 and        # strong sudden spike
-    3 <= flag_count <= 8 and    # avoid long fights
-    clustered_flags >= 2 and    # short burst cluster
-    motion_density < 0.20 and   # not sustained motion
-    duration < 40               # short duration event
+    spike_ratio > 35 and
+    flag_count >= 4 and
+    clustered_flags >= 2 and
+    tight_clusters >= 1 and
+    strong_peak and
+    not sustained_motion and
+    duration < 180 and
+    strong_hand and
+    strong_neck and
+    strong_pull
 ):
     event_detected = 1
 
@@ -131,8 +190,12 @@ print(f"Mean force_index: {mean_force:.3f}")
 print(f"Spike Ratio: {spike_ratio:.1f}")
 print(f"Flag Count: {flag_count}")
 print(f"Clustered Flags: {clustered_flags}")
+print(f"Tight Clusters: {tight_clusters}")
 print(f"Motion Density: {motion_density:.3f}")
 print(f"Duration: {duration}")
+print(f"Hand Peak: {hand_peak:.3f}")
+print(f"Neck Peak: {neck_peak:.3f}")
+print(f"Pull Peak: {pull_peak:.3f}")
 print("-----------------------------")
 
 print("\n🚨 Snatching Event Detected:", event_detected)
@@ -141,15 +204,18 @@ if event_detected:
     print("Event Frames:", flag_indices[:10])
 
 # ------------------------------------
-# Output Table (Optional)
+# Output Table (Keep Detailed)
 # ------------------------------------
 df = pd.DataFrame({
     "frame_id": range(len(force_indices)),
+    "hand_acc": np.round(hand_acc, 3),
+    "neck_disp": np.round(neck_disp, 3),
+    "distance_change": np.round(dist_change, 3),
     "force_index": np.round(force_indices, 3),
-    "flag": flags
+    "force_flag": flags
 })
 
-print("\n🔎 Sample Output:")
+print("\n🔎 Force-SfM Detailed Output:")
 print(df.head(20))
 
 # ------------------------------------
